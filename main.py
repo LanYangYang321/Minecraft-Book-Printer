@@ -213,4 +213,5 @@ def main(path='input.txt'):
 
 
 if __name__ == "__main__":
-    main("inputs/input2.txt")
+    main("input.txt")
+
