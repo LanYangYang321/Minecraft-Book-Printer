@@ -8,6 +8,7 @@ import win32api
 import win32con
 import pyautogui
 import pyperclip
+import os
 
 # 配置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -37,6 +38,7 @@ class BookConfig:
             '.': 1, ',': 1, ';': 1, ':': 1, "'": 1, '!': 1, '|': 1,
             '<': 2.5, '>': 2.5,
             '→': 4, '~': 4,
+            '—': 4.5,
             '\n': -1
         }
 
@@ -125,8 +127,10 @@ class TextFormatter:
 class InputHandler:
     """输入处理类"""
 
-    def __init__(self, delay: float = 0.1):
+    def __init__(self, delay: float = 0.1, offset_x: int = -50, offset_y: int = -50):
         self.delay = delay
+        self.offset_x = offset_x
+        self.offset_y = offset_y
         self.abort_key = 0x1B  # ESC键虚拟键码
 
     def wait_for_trigger(self, trigger_key: int = win32con.VK_CONTROL):
@@ -137,21 +141,64 @@ class InputHandler:
                 logger.warning("检测到ESC键，程序终止")
                 sys.exit(0)
             if win32api.GetAsyncKeyState(trigger_key) & 0x8000:
-                logger.info("检测到Ctrl键，开始输入")
+                logger.info("检测到Ctrl键，开始/继续输入")
+                # 等待短暂时间让用户放开按键并稳定位置
+                time.sleep(0.15)
                 return
             time.sleep(self.delay)
 
-    def simulate_input(self, pages: List[str]):
-        """模拟键盘输入"""
+    def simulate_input(self, pages: List[str], page_limit: int = 0):
+        """
+        模拟键盘输入：
+        支持 page_limit（每次输入的页数上限）。当 page_limit>0 时，
+        每输入 page_limit 页后暂停并等待 Ctrl 再继续。
+        """
+
+        logger.info("开始自动输入，每页输入前先聚焦输入框，然后点击翻页按钮")
+
         original_pos = pyautogui.position()
         try:
+            pages_total = len(pages)
+            if page_limit is None:
+                page_limit = 0
+
+            # 当 page_limit <= 0 时表示禁用循环暂停模式，一次性输入所有页
+            if page_limit <= 0 or page_limit >= pages_total:
+                logger.debug("页面上限循环模式已禁用或大于总页数，直接一次性输入所有页")
+                count_since_resume = pages_total  # just bypass chunk check
+            else:
+                count_since_resume = 0
+
             for idx, page in enumerate(pages, 1):
+                # 1) 鼠标向左上偏移，点击输入框确保聚焦
+                focus_pos = (original_pos[0] + self.offset_x, original_pos[1] + self.offset_y)
+                pyautogui.moveTo(focus_pos)
+                pyautogui.click()
+                time.sleep(self.delay)
+
+                # 2) 复制到剪贴板并粘贴
                 pyperclip.copy(page)
+                time.sleep(0.05)  # 给系统时间更新剪贴板
                 pyautogui.hotkey('ctrl', 'v')
-                time.sleep(self.delay)
-                pyautogui.click(original_pos)
-                logger.debug(f"已输入第{idx}/{len(pages)}页")
-                time.sleep(self.delay)
+                time.sleep(0.1)
+
+                logger.debug(f"已输入第{idx}/{pages_total}页")
+
+                count_since_resume += 1
+
+                # 3) 如果不是最后一页，点击翻页按钮（回到原位置点击）
+                if idx < pages_total:
+                    pyautogui.moveTo(original_pos)
+                    pyautogui.click()
+                    logger.debug("已点击翻页按钮")
+                    time.sleep(self.delay)
+
+                # 如果启用了 page_limit，且已达到上限，并且还有剩余页 -> 暂停等待 Ctrl
+                if 0 < page_limit < pages_total and count_since_resume >= page_limit and idx < pages_total:
+                    logger.info(f"已输入 {count_since_resume} 页（上限 {page_limit}），暂停。按 Ctrl 继续，按 ESC 取消。")
+                    self.wait_for_trigger()
+                    count_since_resume = 0  # 重置计数，继续下一轮
+
         except Exception as e:
             logger.error(f"输入过程中发生错误: {str(e)}")
             raise
@@ -168,44 +215,53 @@ def main(path='input.txt'):
                         help="仅预览分页结果不执行输入")
     parser.add_argument('--verbose', action='store_true',
                         help="显示详细调试信息")
+    parser.add_argument('--offset_x', type=int, default=-50,
+                        help="鼠标聚焦点X偏移（默认-50）")
+    parser.add_argument('--offset_y', type=int, default=-50,
+                        help="鼠标聚焦点Y偏移（默认-50）")
+    parser.add_argument('--page-limit', type=int, default=0,
+                        help="启用页面上限循环模式：每次最多输入 N 页，然后暂停等待 Ctrl 再继续。0 表示禁用（默认）")
     args = parser.parse_args()
 
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
-    # 初始化配置
     config = BookConfig(lines_per_page=args.lines)
     formatter = TextFormatter(config)
-    input_handler = InputHandler()
+    input_handler = InputHandler(delay=0.1, offset_x=args.offset_x, offset_y=args.offset_y)
 
     try:
-        # 读取并处理文本
-        with open(args.input, 'r', encoding='utf-8') as f:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        input_file = os.path.join(base_dir, args.input)
+
+        with open(input_file, 'r', encoding='utf-8') as f:
             text = f.read()
+
+        # ✅ 文本预处理：合并多余换行
+        text = re.sub(r'\n{2,}', '\n\n', text.strip())
 
         lines = formatter.split_into_lines(text)
         pages = formatter.format_pages(lines)
 
-        # 预览模式处理
         if args.preview:
-            logger.info("预览模式（共%d页）:", len(pages))
+            logger.info(f"预览模式（共{len(pages)}页）:")
             for i, page in enumerate(pages, 1):
                 print(f"\n=== 第{i}页 ===")
                 print(page)
                 print("=" * 20)
             return
 
-        # 显示执行信息
         logger.info(f"共处理{len(pages)}页文本（每页{args.lines}行）")
         logger.info("切换到游戏窗口后，按住Ctrl键开始自动输入...")
 
-        # 执行自动输入
+        # 首次等待用户按 Ctrl 启动
         input_handler.wait_for_trigger()
-        input_handler.simulate_input(pages)
+        # 开始输入，传入 page_limit（0 表示一次性输入所有页）
+        input_handler.simulate_input(pages, page_limit=args.page_limit)
         logger.info("所有内容输入完成")
 
     except FileNotFoundError:
-        logger.error(f"输入文件不存在: {args.input}")
+        logger.error(f"输入文件不存在: {input_file}")
         sys.exit(1)
     except Exception as e:
         logger.error(f"发生未预期错误: {str(e)}")
@@ -214,4 +270,3 @@ def main(path='input.txt'):
 
 if __name__ == "__main__":
     main("input.txt")
-
