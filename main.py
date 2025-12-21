@@ -4,8 +4,14 @@ import time
 import sys
 import logging
 from typing import List, Dict
-import win32api
-import win32con
+
+try:
+    # old version of pywin32
+    import win32api
+except ImportError:
+    # new version of pywin32
+    from win32 import win32api
+    
 import pyautogui
 import pyperclip
 import os
@@ -133,7 +139,7 @@ class InputHandler:
         self.offset_y = offset_y
         self.abort_key = 0x1B  # ESC键虚拟键码
 
-    def wait_for_trigger(self, trigger_key: int = win32con.VK_CONTROL):
+    def wait_for_trigger(self, trigger_key: int = 0x11):
         """等待指定触发键按下"""
         logger.info("等待Ctrl键按下（按ESC取消）...")
         while True:
@@ -270,3 +276,4 @@ def main(path='input.txt'):
 
 if __name__ == "__main__":
     main("input.txt")
+
